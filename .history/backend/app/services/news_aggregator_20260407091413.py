@@ -1,0 +1,447 @@
+"""
+Multi-source news aggregator.
+
+Fetches articles from multiple free news APIs concurrently, normalizes
+them into a unified format, and deduplicates by title similarity.
+
+Supported providers:
+  - NewsData.io  (existing)
+  - GNews.io     (100 req/day free)
+  - Currents API (600 req/day free)
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from difflib import SequenceMatcher
+from typing import Any
+from urllib.parse import urlparse
+
+import requests
+
+from app.core.bias import get_bias
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────
+#  Common types
+# ──────────────────────────────────────────────────────
+
+NormalArticle = dict[str, Any]
+"""
+Normalised article dict:
+  title, description, source, bias, link, pubDate, image_url, provider
+"""
+
+
+def _clean(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.strip().split())
+    return cleaned or None
+
+
+def _clean_url(value: Any) -> str | None:
+    url = _clean(value)
+    if not url:
+        return None
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return None
+    return url
+
+
+def _extract_domain(url: Any) -> str | None:
+    cleaned_url = _clean_url(url)
+    if not cleaned_url:
+        return None
+
+    try:
+        parsed = urlparse(cleaned_url)
+    except Exception:
+        return None
+
+    host = (parsed.netloc or "").lower().replace("www.", "")
+    return host or None
+
+
+def _looks_english(text: str | None) -> bool:
+    if not text:
+        return True
+
+    letters = re.findall(r"[A-Za-z\u00C0-\u024F]", text)
+    if not letters:
+        return True
+
+    ascii_letters = re.findall(r"[A-Za-z]", text)
+    return (len(ascii_letters) / len(letters)) >= 0.65
+
+
+# ──────────────────────────────────────────────────────
+#  Provider: NewsData.io
+# ──────────────────────────────────────────────────────
+
+def _fetch_newsdata(
+    *,
+    query: str | None = None,
+    category: str | None = None,
+    size: int = 10,
+) -> list[NormalArticle]:
+    if not settings.newsdata_api_key:
+        return []
+
+    params: dict[str, Any] = {
+        "apikey": settings.newsdata_api_key,
+        "language": "en",
+        "size": min(size, 10),
+    }
+    if query:
+        params["q"] = query
+    if category:
+        params["category"] = category
+
+    try:
+        resp = requests.get(
+            f"{settings.newsdata_base_url}/latest",
+            params=params,
+            timeout=settings.newsdata_timeout_seconds,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning("NewsData fetch failed: %s", exc)
+        return []
+
+    if payload.get("status") == "error":
+        return []
+
+    raw = payload.get("results")
+    if not isinstance(raw, list):
+        return []
+
+    articles: list[NormalArticle] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+
+        title = _clean(item.get("title"))
+        description = _clean(item.get("description"))
+        if not title:
+            continue
+        if not _looks_english(" ".join(part for part in [title, description] if part)):
+            continue
+
+        link = _clean_url(item.get("link"))
+        source = _clean(item.get("source_id") or item.get("source_name")) or _extract_domain(link)
+
+        articles.append({
+            "title": title,
+            "description": description,
+            "source": source,
+            "bias": get_bias(source or ""),
+            "link": link,
+            "pubDate": item.get("pubDate"),
+            "image_url": _clean_url(item.get("image_url")),
+            "provider": "newsdata",
+        })
+    return articles
+
+
+# ──────────────────────────────────────────────────────
+#  Provider: GNews.io
+# ──────────────────────────────────────────────────────
+
+def _fetch_gnews(
+    *,
+    query: str | None = None,
+    category: str | None = None,
+    size: int = 10,
+) -> list[NormalArticle]:
+    if not settings.gnews_api_key:
+        return []
+
+    params: dict[str, Any] = {
+        "apikey": settings.gnews_api_key,
+        "lang": "en",
+        "max": min(size, 10),
+    }
+    if query:
+        params["q"] = query
+
+    # GNews categories: general, world, nation, business, technology, etc.
+    gnews_category_map = {
+        "top": "general",
+        "world": "world",
+        "politics": "nation",
+        "world,politics": "world",
+    }
+    if category:
+        mapped = gnews_category_map.get(category, "general")
+        params["category"] = mapped
+
+    endpoint = "search" if query else "top-headlines"
+
+    try:
+        resp = requests.get(
+            f"https://gnews.io/api/v4/{endpoint}",
+            params=params,
+            timeout=12,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning("GNews fetch failed: %s", exc)
+        return []
+
+    raw = payload.get("articles")
+    if not isinstance(raw, list):
+        return []
+
+    articles: list[NormalArticle] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+
+        title = _clean(item.get("title"))
+        description = _clean(item.get("description"))
+        if not title:
+            continue
+        if not _looks_english(" ".join(part for part in [title, description] if part)):
+            continue
+
+        link = _clean_url(item.get("url"))
+        source_info = item.get("source") or {}
+        source_name = _clean(source_info.get("name") if isinstance(source_info, dict) else None)
+        source_name = source_name or _extract_domain(link)
+
+        articles.append({
+            "title": title,
+            "description": description,
+            "source": source_name,
+            "bias": get_bias(source_name or ""),
+            "link": link,
+            "pubDate": item.get("publishedAt"),
+            "image_url": _clean_url(item.get("image")),
+            "provider": "gnews",
+        })
+    return articles
+
+
+# ──────────────────────────────────────────────────────
+#  Provider: Currents API
+# ──────────────────────────────────────────────────────
+
+def _fetch_currents(
+    *,
+    query: str | None = None,
+    category: str | None = None,
+    size: int = 10,
+) -> list[NormalArticle]:
+    if not settings.currents_api_key:
+        return []
+
+    params: dict[str, Any] = {
+        "apiKey": settings.currents_api_key,
+        "language": "en",
+    }
+    if query:
+        params["keywords"] = query
+    if category:
+        # Currents categories: regional, technology, lifestyle, business,
+        # general, programming, science, entertainment, world, sports, etc.
+        currents_category_map = {
+            "top": "general",
+            "world": "world",
+            "politics": "world",
+            "world,politics": "world",
+        }
+        mapped = currents_category_map.get(category, "general")
+        params["category"] = mapped
+
+    endpoint = "search" if query else "latest-news"
+
+    try:
+        resp = requests.get(
+            f"https://api.currentsapi.services/v1/{endpoint}",
+            params=params,
+            timeout=12,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning("Currents fetch failed: %s", exc)
+        return []
+
+    if payload.get("status") != "ok":
+        return []
+
+    raw = payload.get("news")
+    if not isinstance(raw, list):
+        return []
+
+    articles: list[NormalArticle] = []
+    for item in raw[:size]:
+        if not isinstance(item, dict):
+            continue
+
+        title = _clean(item.get("title"))
+        description = _clean(item.get("description"))
+        if not title:
+            continue
+        if not _looks_english(" ".join(part for part in [title, description] if part)):
+            continue
+
+        link = _clean_url(item.get("url"))
+
+        # Domain is more stable than author for source bias mapping.
+        source_name = _extract_domain(link) or _clean(item.get("author"))
+
+        articles.append({
+            "title": title,
+            "description": description,
+            "source": source_name,
+            "bias": get_bias(source_name or ""),
+            "link": link,
+            "pubDate": item.get("published"),
+            "image_url": _clean_url(item.get("image") if item.get("image") != "None" else None),
+            "provider": "currents",
+        })
+    return articles
+
+
+# ──────────────────────────────────────────────────────
+#  Deduplication
+# ──────────────────────────────────────────────────────
+
+def _title_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def _deduplicate(articles: list[NormalArticle], threshold: float = 0.70) -> list[NormalArticle]:
+    """Remove near-duplicate articles based on title similarity."""
+    unique: list[NormalArticle] = []
+
+    for article in articles:
+        title = article.get("title")
+        if not title:
+            continue
+
+        is_dup = False
+        for existing in unique:
+            existing_title = existing.get("title")
+            if existing_title and _title_similarity(title, existing_title) > threshold:
+                is_dup = True
+                break
+
+        if not is_dup:
+            unique.append(article)
+
+    return unique
+
+
+# ──────────────────────────────────────────────────────
+#  Public API
+# ──────────────────────────────────────────────────────
+
+def aggregate_search(
+    query: str,
+    *,
+    category: str | None = "world,politics",
+    size_per_provider: int = 10,
+) -> list[NormalArticle]:
+    """
+    Fetch news from all configured providers concurrently, merge and
+    deduplicate.  Returns a unified list sorted by freshness.
+    """
+    results: list[NormalArticle] = []
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(
+                _fetch_newsdata,
+                query=query,
+                category=category,
+                size=size_per_provider,
+            ): "newsdata",
+            executor.submit(
+                _fetch_gnews,
+                query=query,
+                category=category,
+                size=size_per_provider,
+            ): "gnews",
+            executor.submit(
+                _fetch_currents,
+                query=query,
+                category=category,
+                size=size_per_provider,
+            ): "currents",
+        }
+
+        for future in as_completed(futures):
+            provider = futures[future]
+            try:
+                articles = future.result()
+                logger.info("Provider %s returned %d articles", provider, len(articles))
+                results.extend(articles)
+            except Exception as exc:
+                logger.warning("Provider %s raised: %s", provider, exc)
+
+    # Deduplicate
+    results = _deduplicate(results)
+
+    # Sort by pubDate descending (newest first), None dates go last
+    def _sort_key(a: NormalArticle) -> str:
+        return a.get("pubDate") or ""
+
+    results.sort(key=_sort_key, reverse=True)
+
+    return results
+
+
+def aggregate_trending(
+    *,
+    query: str | None = None,
+    category: str | None = None,
+    size_per_provider: int = 5,
+) -> list[NormalArticle]:
+    """
+    Fetch trending/top articles from all providers concurrently.
+    Used for the trending sections.
+    """
+    results: list[NormalArticle] = []
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(
+                _fetch_newsdata,
+                query=query,
+                category=category,
+                size=size_per_provider,
+            ): "newsdata",
+            executor.submit(
+                _fetch_gnews,
+                query=query,
+                category=category,
+                size=size_per_provider,
+            ): "gnews",
+            executor.submit(
+                _fetch_currents,
+                query=query,
+                category=category,
+                size=size_per_provider,
+            ): "currents",
+        }
+
+        for future in as_completed(futures):
+            provider = futures[future]
+            try:
+                articles = future.result()
+                results.extend(articles)
+            except Exception as exc:
+                logger.warning("Trending provider %s raised: %s", provider, exc)
+
+    results = _deduplicate(results)
+    results.sort(key=lambda a: a.get("pubDate") or "", reverse=True)
+    return results
