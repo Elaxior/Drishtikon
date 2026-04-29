@@ -94,6 +94,7 @@ Optional environment variables:
 
 ```env
 FRONTEND_ORIGIN=http://localhost:5173
+UVICORN_RELOAD=false
 NEWSDATA_BASE_URL=https://newsdata.io/api/1
 NEWSDATA_TIMEOUT_SECONDS=10
 NEWSDATA_PAGE_SIZE=10
@@ -105,6 +106,7 @@ SUPADATA_POLL_RETRIES=6
 SUPADATA_TRANSCRIPT_MODE=native
 ENABLE_SEARCH_CACHE=true
 SEARCH_CACHE_TTL_SECONDS=180
+SEARCH_CACHE_MAX_ENTRIES=20
 CLAIM_EXTRACTION_WORKERS=4
 CLAIMS_ARTICLE_LIMIT=5
 ANALYSIS_ARTICLE_LIMIT=15
@@ -115,7 +117,7 @@ SEARCH_MAX_QUERY_VARIANTS=2
 SOCIAL_EXTRACTION_TIMEOUT_SECONDS=2.5
 CLAIM_EXTRACTION_TIMEOUT_SECONDS=3.0
 SUMMARY_TIMEOUT_SECONDS=2.5
-WARMUP_EMBEDDINGS_ON_STARTUP=true
+WARMUP_EMBEDDINGS_ON_STARTUP=false
 CONSENSUS_CLAIMS_PER_ARTICLE=3
 CONSENSUS_SIMILARITY_THRESHOLD=0.75
 ENABLE_PINECONE=false
@@ -143,8 +145,10 @@ VERIFIER_FAIL_OPEN=true
 `CONSENSUS_CLAIMS_PER_ARTICLE` is capped to a max of 3 to keep consensus processing fast.
 `ANALYSIS_ARTICLE_LIMIT` controls how many sources appear on the analysis page.
 `SEARCH_SIZE_PER_PROVIDER` controls per-provider fetch depth for `/search` (higher means broader source pool).
-`WARMUP_EMBEDDINGS_ON_STARTUP=true` preloads embedding models during server startup to reduce first-search delays.
+`UVICORN_RELOAD=false` should stay disabled in production to avoid running a second reload process.
+`WARMUP_EMBEDDINGS_ON_STARTUP=false` keeps startup memory low on small instances; set it to `true` only when optional embedding dependencies are installed and you want faster first-request latency.
 `ENABLE_SEARCH_CACHE=true` caches recent search responses in memory to speed repeated queries.
+`SEARCH_CACHE_MAX_ENTRIES` caps in-memory search cache growth to prevent memory bloat on low-tier deployments.
 `CLAIM_EXTRACTION_WORKERS` controls parallel LLM claim extraction concurrency.
 `PROVIDER_TIMEOUT_SECONDS` caps each upstream news-provider call to keep requests fast.
 `SEARCH_LATENCY_BUDGET_SECONDS` sets a hard response-time budget with graceful fallback of slower AI steps.
@@ -172,6 +176,12 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python run.py
+```
+
+Optional semantic-embedding + Pinecone dependencies:
+
+```bash
+pip install -r requirements-ml.txt
 ```
 
 Backend runs at: `http://localhost:8000`
@@ -349,9 +359,9 @@ Limitations (MVP):
 
 ### Consensus Engine (Part 5)
 
-drishtikon now computes claim-level agreement using embeddings and cosine similarity.
+drishtikon computes claim-level agreement using embeddings and cosine similarity when optional ML dependencies are installed, and falls back to deterministic exact-claim grouping otherwise.
 
-Embedding model:
+Optional embedding model:
 - `sentence-transformers/all-MiniLM-L6-v2`
 
 Grouping logic:

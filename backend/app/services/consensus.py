@@ -3,10 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-
 from app.core.config import settings
+from app.core.vector_math import cosine_similarity_matrix
 from app.services.embeddings import get_embedding_model
 
 
@@ -98,7 +96,7 @@ def group_claims(all_claims: list[dict]) -> list[dict[str, Any]]:
     try:
         claims_text = [item["claim"] for item in cleaned_claims]
         embeddings = model.encode(claims_text, normalize_embeddings=True)
-        matrix = cosine_similarity(np.asarray(embeddings))
+        matrix = cosine_similarity_matrix(embeddings)
     except Exception:
         return _fallback_group_claims(cleaned_claims)
 

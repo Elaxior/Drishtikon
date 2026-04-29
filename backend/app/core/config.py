@@ -88,6 +88,7 @@ class Settings(BaseModel):
     # Processing limits
     enable_search_cache: bool = True
     search_cache_ttl_seconds: int = 180
+    search_cache_max_entries: int = 20
     claim_extraction_workers: int = 4
     claims_article_limit: int = 8
     analysis_article_limit: int = 15
@@ -99,7 +100,7 @@ class Settings(BaseModel):
     claim_extraction_timeout_seconds: float = 3.0
     summary_timeout_seconds: float = 2.5
     consensus_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    warmup_embeddings_on_startup: bool = True
+    warmup_embeddings_on_startup: bool = False
     require_full_spectrum: bool = False
     consensus_similarity_threshold: float = 0.75
     consensus_claims_per_article: int = 3
@@ -150,6 +151,7 @@ settings = Settings(
     supadata_transcript_mode=_env_choice("SUPADATA_TRANSCRIPT_MODE", "auto", {"native", "auto", "generate"}),
     enable_search_cache=_env_bool("ENABLE_SEARCH_CACHE", True),
     search_cache_ttl_seconds=_env_int("SEARCH_CACHE_TTL_SECONDS", 180, 0, 1800),
+    search_cache_max_entries=_env_int("SEARCH_CACHE_MAX_ENTRIES", 20, 1, 200),
     claim_extraction_workers=_env_int("CLAIM_EXTRACTION_WORKERS", 4, 1, 8),
     claims_article_limit=_env_int("CLAIMS_ARTICLE_LIMIT", 8, 1, 15),
     analysis_article_limit=_env_int("ANALYSIS_ARTICLE_LIMIT", 15, 3, 30),
@@ -164,7 +166,7 @@ settings = Settings(
         "CONSENSUS_EMBEDDING_MODEL",
         os.getenv("PINECONE_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
     ),
-    warmup_embeddings_on_startup=_env_bool("WARMUP_EMBEDDINGS_ON_STARTUP", True),
+    warmup_embeddings_on_startup=_env_bool("WARMUP_EMBEDDINGS_ON_STARTUP", False),
     require_full_spectrum=_env_bool("REQUIRE_FULL_SPECTRUM", False),
     consensus_similarity_threshold=_env_float("CONSENSUS_SIMILARITY_THRESHOLD", 0.75, 0.5, 0.95),
     consensus_claims_per_article=_env_int("CONSENSUS_CLAIMS_PER_ARTICLE", 3, 1, 3),

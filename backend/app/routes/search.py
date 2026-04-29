@@ -102,26 +102,48 @@ def _get_cached_response(cache_key: str) -> dict[str, Any] | None:
     if not settings.enable_search_cache or settings.search_cache_ttl_seconds <= 0:
         return None
 
+    now = datetime.now(timezone.utc)
     with _CACHE_LOCK:
+        _prune_expired_cache_entries_locked(now)
         cached = _SEARCH_CACHE.get(cache_key)
         if cached is None:
             return None
 
         expires_at, payload = cached
-        if datetime.now(timezone.utc) > expires_at:
+        if now > expires_at:
             _SEARCH_CACHE.pop(cache_key, None)
             return None
 
         return payload
 
 
+def _prune_expired_cache_entries_locked(now: datetime) -> None:
+    expired_keys = [key for key, (expires_at, _) in _SEARCH_CACHE.items() if now > expires_at]
+    for key in expired_keys:
+        _SEARCH_CACHE.pop(key, None)
+
+
+def _enforce_cache_limit_locked() -> None:
+    max_entries = settings.search_cache_max_entries
+    overflow = len(_SEARCH_CACHE) - max_entries
+    if overflow <= 0:
+        return
+
+    eviction_order = sorted(_SEARCH_CACHE.items(), key=lambda item: item[1][0])
+    for key, _ in eviction_order[:overflow]:
+        _SEARCH_CACHE.pop(key, None)
+
+
 def _set_cached_response(cache_key: str, payload: dict[str, Any]) -> None:
     if not settings.enable_search_cache or settings.search_cache_ttl_seconds <= 0:
         return
 
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.search_cache_ttl_seconds)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=settings.search_cache_ttl_seconds)
     with _CACHE_LOCK:
+        _prune_expired_cache_entries_locked(now)
         _SEARCH_CACHE[cache_key] = (expires_at, payload)
+        _enforce_cache_limit_locked()
 
 
 def _remaining_budget_seconds(started_at: float) -> float:

@@ -4,10 +4,8 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
 
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-
 from app.core.config import settings
+from app.core.vector_math import cosine_similarity_to_many
 from app.services.embeddings import get_embedding_model
 
 VERDICTS = ("SUPPORTED", "CONTRADICTED", "MIXED", "UNCERTAIN")
@@ -120,7 +118,9 @@ def _evidence_candidates(claim: str, articles: list[dict[str, Any]]) -> list[dic
     try:
         claim_embedding = model.encode([claim], normalize_embeddings=True)
         snippet_embeddings = model.encode(snippets, normalize_embeddings=True)
-        similarity_scores = cosine_similarity(np.asarray(claim_embedding), np.asarray(snippet_embeddings))[0]
+        if len(claim_embedding) == 0:
+            raise ValueError("Claim embedding is empty.")
+        similarity_scores = cosine_similarity_to_many(claim_embedding[0], snippet_embeddings)
     except Exception:
         fallback = snippet_meta[: settings.verification_evidence_limit]
         for item in fallback:
